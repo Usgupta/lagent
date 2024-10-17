@@ -16,6 +16,15 @@ from duckduckgo_search import DDGS
 from lagent.actions import BaseAction, tool_api
 from lagent.actions.parser import BaseParser, JsonParser
 
+from pathlib import Path
+import os
+from PyPDF2 import PdfReader
+
+from qdrant_client import QdrantClient, models
+from transformers import AutoTokenizer, AutoModel
+import torch
+from typing import List, Tuple
+import json
 
 class BaseSearch:
 
@@ -39,6 +48,26 @@ class BaseSearch:
                     break
         return filtered_results
 
+class PdfBaseSearch:
+
+    def __init__(self, topk: int = 3, black_list: List[str] = None):
+        self.topk = topk
+        self.black_list = black_list
+
+    def _filter_results(self, results: List[tuple]) -> dict:
+        filtered_results = {}
+        count = 0
+        for filename, snippet, title in results:
+            filtered_results[count] = {
+                'filename': filename,
+                'summ': json.dumps(snippet, ensure_ascii=False)[1:-1],
+                'title': title
+            }
+            count += 1
+            if count >= self.topk:
+                break
+        return filtered_results
+    
 
 class DuckDuckGoSearch(BaseSearch):
 
@@ -372,6 +401,112 @@ class GoogleSearch(BaseSearch):
 
         return self._filter_results(raw_results)
 
+# class MockRAG:
+#     def search_pdfs(self, query: str) -> dict:
+#         # Mock implementation of the RAG search
+#         return [
+#             {"filename": "document1.pdf", "snippet": "Snippet from document 1", "title": "Title 1"},
+#             {"filename": "document2.pdf", "snippet": "Snippet from document 2", "title": "Title 2"},
+#             {"filename": "document3.pdf", "snippet": "Snippet from document 3", "title": "Title 3"}
+#         ]
+
+
+
+
+# load_dotenv()
+
+# Initialize the embedding model and tokenizer
+model_name = "thenlper/gte-base"  # Change to your chosen model
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModel.from_pretrained(model_name)
+
+def extract_text_from_pdf(file_path: str) -> List[Tuple[int, str]]:
+    pages_text = []
+    with open(file_path, 'rb') as pdf_file:
+        reader = PdfReader(pdf_file)
+        for page_num, page in enumerate(reader.pages):
+            text = page.extract_text() or ''
+            pages_text.append((page_num + 1, text))  # Store (page_number, text)
+    return pages_text
+
+class PdfSearch:
+    def __init__(self,
+                 api_key: str,
+                 region: str = 'zh-CN',
+                 topk: int = 3,
+                 black_list: List[str] = [
+                     'enoN',
+                     'youtube.com',
+                     'bilibili.com',
+                     'researchgate.net',
+                 ],
+                 pdf_paths: List[str] = None
+                 ):
+        self.topk = topk
+        self.pdf_paths = pdf_paths if pdf_paths else ["/mnt/ssd/umang_gupta/.cache/xdg_cache_home/micromamba/envs/mindsearch-conda/lib/python3.10/site-packages/lagent/actions/SIA OM diversion strat.pdf"]
+        self.qdrant_client = QdrantClient(url="http://localhost:6333")
+        self.collection_name = "pdf_search_collection"
+        self.idx = 0
+        self._initialize_qdrant()
+
+    def _initialize_qdrant(self):
+        self.qdrant_client.recreate_collection(
+            collection_name=self.collection_name,
+            vectors_config=models.VectorParams(size=768, distance=models.Distance.COSINE),  # Adjust size based on your model
+        )
+        
+        for pdf_path in self.pdf_paths:
+            self._index_pdf(pdf_path)
+
+    def _index_pdf(self, pdf_path: str):
+        pages_text = extract_text_from_pdf(pdf_path)
+        
+        for page_number, pdf_text in pages_text:
+            inputs = tokenizer(pdf_text, return_tensors='pt', truncation=True, padding=True)
+            with torch.no_grad():
+                embeddings = model(**inputs).last_hidden_state.mean(dim=1).squeeze().numpy()  # Get embeddings
+            
+            self.qdrant_client.upsert(
+                collection_name=self.collection_name,
+                points=[{
+                    "id": self.idx,
+                    "vector": embeddings.tolist(),  # Ensure it's a list for Qdrant
+                    "payload": {"path": pdf_path, "content": pdf_text, "page_number": page_number}
+                }]
+            )
+            self.idx += 1
+
+    def search(self, query: str) -> dict:
+        inputs = tokenizer(query, return_tensors='pt', truncation=True, padding=True)
+        with torch.no_grad():
+            query_embedding = model(**inputs).last_hidden_state.mean(dim=1).squeeze().numpy()
+        
+        search_results = self.qdrant_client.search(
+            collection_name=self.collection_name,
+            query_vector=query_embedding.tolist(),
+            limit=self.topk
+        )
+        
+        filtered_results = self._filter_results(search_results)
+        return filtered_results
+
+    def _filter_results(self, results) -> dict:
+        filtered_results = {}
+        count = 0
+        
+        for result in results:
+            filtered_results[count] = {
+                'filename': result.payload["path"],
+                'summ': result.payload["content"][:200], 
+                'title': result.payload["path"].split("/")[-1],
+                'page_number': result.payload["page_number"]  
+            }
+            count += 1
+            
+            if count >= self.topk:
+                break
+                
+        return filtered_results
 
 class ContentFetcher:
 
@@ -490,6 +625,227 @@ class BingBrowser(BaseAction):
     def open_url(self, url: str) -> dict:
         print(f'Start Browsing: {url}')
         web_success, web_content = self.fetcher.fetch(url)
+        if web_success:
+            return {'type': 'text', 'content': web_content}
+        else:
+            return {'error': web_content}
+
+
+# class PdfBrowser(BaseAction):
+#     """Wrapper around the PDF Browser Tool.
+#     """
+    
+    
+#     def __init__(self,
+#                  searcher_type: str = 'DuckDuckGoSearch',
+#                  timeout: int = 5,
+#                  black_list: Optional[List[str]] = [
+#                      'enoN',
+#                      'youtube.com',
+#                      'bilibili.com',
+#                      'researchgate.net',
+#                  ],
+#                  topk: int = 3,
+#                  description: Optional[dict] = None,
+#                  parser: Type[BaseParser] = JsonParser,
+#                  enable: bool = True,
+#                  **kwargs):
+#         self.timeout = timeout
+#         self.topk = topk
+#         self.search_results = None
+#         self.pdf_paths = None  # List of all PDF file paths
+#         super().__init__(description, parser, enable)
+        
+        
+#     @tool_api
+#     def search(self, query: Union[str, List[str]]) -> dict:
+#         queries = query if isinstance(query, list) else [query]
+#         search_results = {}
+#         pdf_path = '/home/umang_gupta/mindsearch-pdf/SIA OM diversion strat.pdf'
+#         combined_results = []
+#         with ThreadPoolExecutor() as executor:
+#             futures = {executor.submit(self._search_pdf, pdf_path , q): q for q in queries}
+#             for future in futures:
+#                 pdf_path = futures[future]
+#                 try:
+#                     result = future.result()
+#                     combined_results.extend(result)
+#                 except Exception as e:
+#                     print(f'Error reading {pdf_path}: {e}')  # Handle errors in reading PDFs
+#         return combined_results
+
+#     def _search_pdf(self, pdf_path, query):
+#         results = []
+#         try:
+#             with open(pdf_path, 'rb') as f:
+#                 reader = PdfReader(f)
+#                 for page_number, page in enumerate(reader.pages):
+#                     text = page.extract_text() or ''
+#                     if query.lower() in text.lower():
+#                         results.append((pdf_path, page_number, text))  # Store filename, page number, and matched text
+#         except Exception as e:
+#             print(f'Failed to read {pdf_path}: {e}')  # Handle any fail to read issues
+
+#     # @tool_api
+#     # def search(self, query: Union[str, List[str]]) -> dict:
+#     #     """Mock PDF search API
+#     #     Args:
+#     #         query (List[str]): list of search query strings
+#     #     """
+#     #     queries = query if isinstance(query, list) else [query]
+#     #     search_results = {}
+
+#     #     for idx, q in enumerate(queries):
+#     #         search_results[idx] = {
+#     #             'summ': f'Mock summary for query: {q}',
+#     #             'title': f'Mock title for query: {q}',
+#     #             'filename':f'filename for query: {q}.pdf'
+#     #         }
+
+#     #     self.search_results = search_results
+#     #     return self.search_results
+
+#     @tool_api
+#     def select(self, select_ids):
+#         if not self.pdf_paths:
+#             raise ValueError('No PDF files available to select from.')
+
+#         new_selected_results = {}
+#         with ThreadPoolExecutor() as executor:
+#             futures = {executor.submit(self._fetch_pdf_content, self.pdf_paths[select_id]): select_id for select_id in select_ids if select_id < len(self.pdf_paths)}
+#             for future in futures:
+#                 select_id = futures[future]
+#                 try:
+#                     content = future.result()
+#                     new_selected_results[select_id] = content
+#                 except Exception as e:
+#                     print(f'Error fetching content from {self.pdf_paths[select_id]}: {e}')  # Handle errors while fetching
+
+#         return new_selected_results
+
+#     def _fetch_pdf_content(self, pdf_path):
+#         content = ''
+#         try:
+#             with open(pdf_path, 'rb') as f:
+#                 reader = PdfReader(f)
+#                 for page in reader.pages:
+#                     content += page.extract_text() or ''  # Extract text from each page
+#         except Exception as e:
+#             print(f'Failed to read {pdf_path}: {e}')  # Handle any fail to read issues
+#         return content
+
+#     # @tool_api
+#     # def open_url(self, url: str) -> dict:
+#     #     print('\n THEY ARE CALLING MEEE \n')
+#     #     print(f'Start Browsing PDF: {url}')
+#     #     # Mock fetching PDF content
+#     #     return {'type': 'text', 'content': f'Mock content for PDF at {url}'}
+    
+#     @tool_api
+#     def open_pdf(self):
+#         try:
+#             with open(self.pdf_path, 'rb') as f:
+#                 reader = PdfReader(f)
+#                 content = ''
+#                 for page in reader.pages:
+#                     content += page.extract_text() or ''  # Extract text from each page
+#             return {'type': 'text', 'content': content}
+#         except Exception as e:
+#             return {'error': f'Failed to read {self.pdf_path}: {e}'}
+
+class PdfBrowser(BaseAction):
+    """Wrapper around the PDF Browser Tool.
+    """
+
+    def __init__(self,
+                 searcher_type: str = 'PdfSearch',
+                 timeout: int = 5,
+                 black_list: Optional[List[str]] = None,
+                 topk: int = 20,
+                 description: Optional[dict] = None,
+                 parser: Type[BaseParser] = JsonParser,
+                 enable: bool = True,
+                 **kwargs):
+        self.searcher = eval(searcher_type)(
+            black_list=black_list, topk=topk, **kwargs)
+        self.fetcher = ContentFetcher(timeout=timeout)
+        self.search_results = None
+        super().__init__(description, parser, enable)
+
+    @tool_api
+    def search(self, query: Union[str, List[str]]) -> dict:
+        """PDF search API
+        Args:
+            query (List[str]): list of search query strings
+        """
+        queries = query if isinstance(query, list) else [query]
+        search_results = {}
+
+        with ThreadPoolExecutor() as executor:
+            future_to_query = {
+                executor.submit(self.searcher.search, q): q
+                for q in queries
+            }
+
+            for future in as_completed(future_to_query):
+                query = future_to_query[future]
+                try:
+                    results = future.result()
+                except Exception as exc:
+                    warnings.warn(f'{query} generated an exception: {exc}')
+                else:
+                    for result in results.values():
+                        if result['filename'] not in search_results:
+                            search_results[result['filename']] = result
+                        else:
+                            search_results[
+                                result['filename']]['summ'] += f"\n{result['summ']}"
+
+        self.search_results = {
+            idx: result
+            for idx, result in enumerate(search_results.values())
+        }
+        return self.search_results
+
+    @tool_api
+    def select(self, select_ids: List[int]) -> dict:
+        """Get the detailed content on the selected pages.
+
+        Args:
+            select_ids (List[int]): list of index to select. Max number of index to be selected is no more than 4.
+        """
+        if not self.search_results:
+            raise ValueError('No search results to select from.')
+
+        new_search_results = {}
+        with ThreadPoolExecutor() as executor:
+            future_to_id = {
+                executor.submit(self.fetcher.fetch,
+                                self.search_results[select_id]['filename']):
+                select_id
+                for select_id in select_ids if select_id in self.search_results
+            }
+
+            for future in as_completed(future_to_id):
+                select_id = future_to_id[future]
+                try:
+                    web_success, web_content = future.result()
+                except Exception as exc:
+                    warnings.warn(f'{select_id} generated an exception: {exc}')
+                else:
+                    if web_success:
+                        self.search_results[select_id][
+                            'content'] = web_content[:8192]
+                        new_search_results[select_id] = self.search_results[
+                            select_id].copy()
+                        new_search_results[select_id].pop('summ')
+
+        return new_search_results
+
+    @tool_api
+    def open_url(self, filename: str) -> dict:
+        print(f'Start Browsing: {filename}')
+        web_success, web_content = self.fetcher.fetch(filename)
         if web_success:
             return {'type': 'text', 'content': web_content}
         else:
