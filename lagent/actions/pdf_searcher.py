@@ -25,18 +25,26 @@ from transformers import AutoTokenizer, AutoModel
 import torch
 from typing import List, Tuple
 import json
+import io
+from io import BufferedReader
 
 
+# Initialize the embedding model and tokenizer
+model_name = "thenlper/gte-base"  # Change to your chosen model
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModel.from_pretrained(model_name)
 
+def extract_text_from_pdf(file) -> List[Tuple[int, str]]:
+    pages_text = []        
 
-
-def extract_text_from_pdf(file_path: str) -> List[Tuple[int, str]]:
-    pages_text = []
-    with open(file_path, 'rb') as pdf_file:
-        reader = PdfReader(pdf_file)
-        for page_num, page in enumerate(reader.pages):
-            text = page.extract_text() or ''
-            pages_text.append((page_num + 1, text))  # Store (page_number, text)
+    file_content = file.file.read()
+    pdf_file = io.BytesIO(file_content)
+   
+    
+    reader = PdfReader(pdf_file)
+    for page_num, page in enumerate(reader.pages):
+        text = page.extract_text() or ''
+        pages_text.append((page_num + 1, text))  # Store (page_number, text)
     return pages_text
 
 class PdfSearch:
@@ -50,19 +58,18 @@ class PdfSearch:
                      'bilibili.com',
                      'researchgate.net',
                  ],
-                 pdf_paths: List[str] = None,
-                 model_name = "thenlper/gte-base"
+                 files = List[Tuple[str, BufferedReader]],
                  ):
         self.topk = topk
+        
+        #CREATE YOUR OWN QDRANT client URL 
+        
         self.qdrant_client = QdrantClient(url="http://localhost:6333")
         self.collection_name = "pdf_search_collection"
         self.idx = 0
+        self.files = files
         self._initialize_qdrant()
         
-        # Initialize the embedding model and tokenizer
-        self.model_name = model_name  # Change to your chosen model
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        self.model = AutoModel.from_pretrained(self.model_name)
 
     def _initialize_qdrant(self):
         self.qdrant_client.recreate_collection(
@@ -70,40 +77,36 @@ class PdfSearch:
             vectors_config=models.VectorParams(size=768, distance=models.Distance.COSINE),  # Adjust size based on your model
         )
         
-        for pdf_path in self.pdf_paths:
-            self._index_pdf(pdf_path)
+        for file in self.files:
             
-    def _extract_text_from_pdf(self,file_path: str) -> List[Tuple[int, str]]:
-        pages_text = []
-        with open(file_path, 'rb') as pdf_file:
-            reader = PdfReader(pdf_file)
-            for page_num, page in enumerate(reader.pages):
-                text = page.extract_text() or ''
-                pages_text.append((page_num + 1, text))  # Store (page_number, text)
-        return pages_text
+            print(file)
+            
+            print(type(file))
+            
+            self._index_pdf(file)
 
-    def _index_pdf(self, pdf_path: str):
-        pages_text = self._extract_text_from_pdf(pdf_path)
+    def _index_pdf(self, pdf_file):
+        pages_text = extract_text_from_pdf(pdf_file)
         
         for page_number, pdf_text in pages_text:
-            inputs = self.tokenizer(pdf_text, return_tensors='pt', truncation=True, padding=True)
+            inputs = tokenizer(pdf_text, return_tensors='pt', truncation=True, padding=True)
             with torch.no_grad():
-                embeddings = self.model(**inputs).last_hidden_state.mean(dim=1).squeeze().numpy()  # Get embeddings
+                embeddings = model(**inputs).last_hidden_state.mean(dim=1).squeeze().numpy()  # Get embeddings
             
             self.qdrant_client.upsert(
                 collection_name=self.collection_name,
                 points=[{
                     "id": self.idx,
                     "vector": embeddings.tolist(),  # Ensure it's a list for Qdrant
-                    "payload": {"path": pdf_path, "content": pdf_text, "page_number": page_number}
+                    "payload": {"path": pdf_file.filename, "content": pdf_text, "page_number": page_number}
                 }]
             )
             self.idx += 1
 
     def search(self, query: str) -> dict:
-        inputs = self.tokenizer(query, return_tensors='pt', truncation=True, padding=True)
+        inputs = tokenizer(query, return_tensors='pt', truncation=True, padding=True)
         with torch.no_grad():
-            query_embedding = self.model(**inputs).last_hidden_state.mean(dim=1).squeeze().numpy()
+            query_embedding = model(**inputs).last_hidden_state.mean(dim=1).squeeze().numpy()
         
         search_results = self.qdrant_client.search(
             collection_name=self.collection_name,
@@ -121,6 +124,7 @@ class PdfSearch:
         for result in results:
             filtered_results[count] = {
                 'filename': result.payload["path"],
+                # you may replace this with an AI summary instead of first 200 characters
                 'summ': result.payload["content"][:200], 
                 'title': result.payload["path"].split("/")[-1],
                 'page_number': result.payload["page_number"]  
@@ -230,34 +234,24 @@ class PdfBrowser(BaseAction):
             return {'type': 'text', 'content': web_content}
         else:
             return {'error': web_content}
-import asyncio
-import json
-import logging
-import random
-import re
-import time
-import warnings
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Optional, Tuple, Type, Union
 
-import requests
-from bs4 import BeautifulSoup
-from cachetools import TTLCache, cached
-from duckduckgo_search import DDGS
+class ContentFetcher:
 
-from lagent.actions import BaseAction, tool_api
-from lagent.actions.parser import BaseParser, JsonParser
+    def __init__(self, timeout: int = 5):
+        self.timeout = timeout
 
-from pathlib import Path
-import os
-from PyPDF2 import PdfReader
+    @cached(cache=TTLCache(maxsize=100, ttl=600))
+    def fetch(self, url: str) -> Tuple[bool, str]:
+        try:
+            response = requests.get(url, timeout=self.timeout)
+            response.raise_for_status()
+            html = response.content
+        except requests.RequestException as e:
+            return False, str(e)
 
-from qdrant_client import QdrantClient, models
-from transformers import AutoTokenizer, AutoModel
-import torch
-from typing import List, Tuple
-import json
-
+        text = BeautifulSoup(html, 'html.parser').get_text()
+        cleaned_text = re.sub(r'\n+', '\n', text)
+        return True, cleaned_text
 
 class PdfBrowser(BaseAction):
     """Wrapper around the PDF Browser Tool.
@@ -271,9 +265,13 @@ class PdfBrowser(BaseAction):
                  description: Optional[dict] = None,
                  parser: Type[BaseParser] = JsonParser,
                  enable: bool = True,
+                 files = List[Tuple[str, BufferedReader]],
                  **kwargs):
         self.searcher = eval(searcher_type)(
-            black_list=black_list, topk=topk, **kwargs)
+            black_list=black_list,
+            topk=topk,
+            files=files,
+            **kwargs)
         self.fetcher = ContentFetcher(timeout=timeout)
         self.search_results = None
         super().__init__(description, parser, enable)
