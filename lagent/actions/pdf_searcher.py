@@ -54,7 +54,6 @@ class PdfSearch:
                  model_name = "thenlper/gte-base"
                  ):
         self.topk = topk
-        self.pdf_paths = pdf_paths if pdf_paths else ["/mnt/ssd/umang_gupta/.cache/xdg_cache_home/micromamba/envs/mindsearch-conda/lib/python3.10/site-packages/lagent/actions/SIA OM diversion strat.pdf"]
         self.qdrant_client = QdrantClient(url="http://localhost:6333")
         self.collection_name = "pdf_search_collection"
         self.idx = 0

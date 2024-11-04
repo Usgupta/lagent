@@ -25,6 +25,9 @@ from transformers import AutoTokenizer, AutoModel
 import torch
 from typing import List, Tuple
 import json
+from io import BufferedReader
+import io
+
 
 class BaseSearch:
 
@@ -401,32 +404,29 @@ class GoogleSearch(BaseSearch):
 
         return self._filter_results(raw_results)
 
-# class MockRAG:
-#     def search_pdfs(self, query: str) -> dict:
-#         # Mock implementation of the RAG search
-#         return [
-#             {"filename": "document1.pdf", "snippet": "Snippet from document 1", "title": "Title 1"},
-#             {"filename": "document2.pdf", "snippet": "Snippet from document 2", "title": "Title 2"},
-#             {"filename": "document3.pdf", "snippet": "Snippet from document 3", "title": "Title 3"}
-#         ]
-
-
-
-
-# load_dotenv()
-
 # Initialize the embedding model and tokenizer
 model_name = "thenlper/gte-base"  # Change to your chosen model
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 model = AutoModel.from_pretrained(model_name)
 
-def extract_text_from_pdf(file_path: str) -> List[Tuple[int, str]]:
+def extract_text_from_pdf(file) -> List[Tuple[int, str]]:
     pages_text = []
-    with open(file_path, 'rb') as pdf_file:
-        reader = PdfReader(pdf_file)
-        for page_num, page in enumerate(reader.pages):
-            text = page.extract_text() or ''
-            pages_text.append((page_num + 1, text))  # Store (page_number, text)
+    print(type(file))
+    # try:
+    #     pdf_file = file.getvalue()
+    # except Exception as e:
+    #     print('didnt work', e)
+        
+
+    file_content = file.file.read()
+    print(type(file_content))
+    pdf_file = io.BytesIO(file_content)
+   
+    
+    reader = PdfReader(pdf_file)
+    for page_num, page in enumerate(reader.pages):
+        text = page.extract_text() or ''
+        pages_text.append((page_num + 1, text))  # Store (page_number, text)
     return pages_text
 
 class PdfSearch:
@@ -440,14 +440,15 @@ class PdfSearch:
                      'bilibili.com',
                      'researchgate.net',
                  ],
-                 pdf_paths: List[str] = None
+                 files = List[Tuple[str, BufferedReader]],
                  ):
         self.topk = topk
-        self.pdf_paths = pdf_paths if pdf_paths else ["/mnt/ssd/umang_gupta/.cache/xdg_cache_home/micromamba/envs/mindsearch-conda/lib/python3.10/site-packages/lagent/actions/SIA OM diversion strat.pdf"]
         self.qdrant_client = QdrantClient(url="http://localhost:6333")
         self.collection_name = "pdf_search_collection"
         self.idx = 0
+        self.files = files
         self._initialize_qdrant()
+        
 
     def _initialize_qdrant(self):
         self.qdrant_client.recreate_collection(
@@ -455,11 +456,16 @@ class PdfSearch:
             vectors_config=models.VectorParams(size=768, distance=models.Distance.COSINE),  # Adjust size based on your model
         )
         
-        for pdf_path in self.pdf_paths:
-            self._index_pdf(pdf_path)
+        for file in self.files:
+            
+            print(file)
+            
+            print(type(file))
+            
+            self._index_pdf(file)
 
-    def _index_pdf(self, pdf_path: str):
-        pages_text = extract_text_from_pdf(pdf_path)
+    def _index_pdf(self, pdf_file):
+        pages_text = extract_text_from_pdf(pdf_file)
         
         for page_number, pdf_text in pages_text:
             inputs = tokenizer(pdf_text, return_tensors='pt', truncation=True, padding=True)
@@ -471,7 +477,7 @@ class PdfSearch:
                 points=[{
                     "id": self.idx,
                     "vector": embeddings.tolist(),  # Ensure it's a list for Qdrant
-                    "payload": {"path": pdf_path, "content": pdf_text, "page_number": page_number}
+                    "payload": {"path": pdf_file.filename, "content": pdf_text, "page_number": page_number}
                 }]
             )
             self.idx += 1
@@ -631,128 +637,6 @@ class BingBrowser(BaseAction):
             return {'error': web_content}
 
 
-# class PdfBrowser(BaseAction):
-#     """Wrapper around the PDF Browser Tool.
-#     """
-    
-    
-#     def __init__(self,
-#                  searcher_type: str = 'DuckDuckGoSearch',
-#                  timeout: int = 5,
-#                  black_list: Optional[List[str]] = [
-#                      'enoN',
-#                      'youtube.com',
-#                      'bilibili.com',
-#                      'researchgate.net',
-#                  ],
-#                  topk: int = 3,
-#                  description: Optional[dict] = None,
-#                  parser: Type[BaseParser] = JsonParser,
-#                  enable: bool = True,
-#                  **kwargs):
-#         self.timeout = timeout
-#         self.topk = topk
-#         self.search_results = None
-#         self.pdf_paths = None  # List of all PDF file paths
-#         super().__init__(description, parser, enable)
-        
-        
-#     @tool_api
-#     def search(self, query: Union[str, List[str]]) -> dict:
-#         queries = query if isinstance(query, list) else [query]
-#         search_results = {}
-#         pdf_path = '/home/umang_gupta/mindsearch-pdf/SIA OM diversion strat.pdf'
-#         combined_results = []
-#         with ThreadPoolExecutor() as executor:
-#             futures = {executor.submit(self._search_pdf, pdf_path , q): q for q in queries}
-#             for future in futures:
-#                 pdf_path = futures[future]
-#                 try:
-#                     result = future.result()
-#                     combined_results.extend(result)
-#                 except Exception as e:
-#                     print(f'Error reading {pdf_path}: {e}')  # Handle errors in reading PDFs
-#         return combined_results
-
-#     def _search_pdf(self, pdf_path, query):
-#         results = []
-#         try:
-#             with open(pdf_path, 'rb') as f:
-#                 reader = PdfReader(f)
-#                 for page_number, page in enumerate(reader.pages):
-#                     text = page.extract_text() or ''
-#                     if query.lower() in text.lower():
-#                         results.append((pdf_path, page_number, text))  # Store filename, page number, and matched text
-#         except Exception as e:
-#             print(f'Failed to read {pdf_path}: {e}')  # Handle any fail to read issues
-
-#     # @tool_api
-#     # def search(self, query: Union[str, List[str]]) -> dict:
-#     #     """Mock PDF search API
-#     #     Args:
-#     #         query (List[str]): list of search query strings
-#     #     """
-#     #     queries = query if isinstance(query, list) else [query]
-#     #     search_results = {}
-
-#     #     for idx, q in enumerate(queries):
-#     #         search_results[idx] = {
-#     #             'summ': f'Mock summary for query: {q}',
-#     #             'title': f'Mock title for query: {q}',
-#     #             'filename':f'filename for query: {q}.pdf'
-#     #         }
-
-#     #     self.search_results = search_results
-#     #     return self.search_results
-
-#     @tool_api
-#     def select(self, select_ids):
-#         if not self.pdf_paths:
-#             raise ValueError('No PDF files available to select from.')
-
-#         new_selected_results = {}
-#         with ThreadPoolExecutor() as executor:
-#             futures = {executor.submit(self._fetch_pdf_content, self.pdf_paths[select_id]): select_id for select_id in select_ids if select_id < len(self.pdf_paths)}
-#             for future in futures:
-#                 select_id = futures[future]
-#                 try:
-#                     content = future.result()
-#                     new_selected_results[select_id] = content
-#                 except Exception as e:
-#                     print(f'Error fetching content from {self.pdf_paths[select_id]}: {e}')  # Handle errors while fetching
-
-#         return new_selected_results
-
-#     def _fetch_pdf_content(self, pdf_path):
-#         content = ''
-#         try:
-#             with open(pdf_path, 'rb') as f:
-#                 reader = PdfReader(f)
-#                 for page in reader.pages:
-#                     content += page.extract_text() or ''  # Extract text from each page
-#         except Exception as e:
-#             print(f'Failed to read {pdf_path}: {e}')  # Handle any fail to read issues
-#         return content
-
-#     # @tool_api
-#     # def open_url(self, url: str) -> dict:
-#     #     print('\n THEY ARE CALLING MEEE \n')
-#     #     print(f'Start Browsing PDF: {url}')
-#     #     # Mock fetching PDF content
-#     #     return {'type': 'text', 'content': f'Mock content for PDF at {url}'}
-    
-#     @tool_api
-#     def open_pdf(self):
-#         try:
-#             with open(self.pdf_path, 'rb') as f:
-#                 reader = PdfReader(f)
-#                 content = ''
-#                 for page in reader.pages:
-#                     content += page.extract_text() or ''  # Extract text from each page
-#             return {'type': 'text', 'content': content}
-#         except Exception as e:
-#             return {'error': f'Failed to read {self.pdf_path}: {e}'}
-
 class PdfBrowser(BaseAction):
     """Wrapper around the PDF Browser Tool.
     """
@@ -765,9 +649,13 @@ class PdfBrowser(BaseAction):
                  description: Optional[dict] = None,
                  parser: Type[BaseParser] = JsonParser,
                  enable: bool = True,
+                 files = List[Tuple[str, BufferedReader]],
                  **kwargs):
         self.searcher = eval(searcher_type)(
-            black_list=black_list, topk=topk, **kwargs)
+            black_list=black_list,
+            topk=topk,
+            files=files,
+            **kwargs)
         self.fetcher = ContentFetcher(timeout=timeout)
         self.search_results = None
         super().__init__(description, parser, enable)
