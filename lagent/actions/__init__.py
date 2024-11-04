@@ -3,7 +3,8 @@ from typing import Type
 from .action_executor import ActionExecutor
 from .arxiv_search import ArxivSearch
 from .base_action import TOOL_REGISTRY, BaseAction, tool_api
-from .bing_browser import BingBrowser, PdfBrowser
+from .bing_browser import BingBrowser
+from .pdf_browser import PdfBrowser
 from .bing_map import BINGMap
 from .builtin_actions import FinishAction, InvalidAction, NoAction
 from .google_scholar_search import GoogleScholar
