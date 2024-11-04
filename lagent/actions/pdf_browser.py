@@ -59,12 +59,13 @@ class PdfSearch:
                      'researchgate.net',
                  ],
                  files = List[Tuple[str, BufferedReader]],
+                 qdrant_url = None
                  ):
         self.topk = topk
         
-        #CREATE YOUR OWN QDRANT client URL 
+        #CREATE YOUR OWN QDRANT client URL             
         
-        self.qdrant_client = QdrantClient(url="http://localhost:6333")
+        self.qdrant_client = QdrantClient(url=qdrant_url,api_key=api_key)
         self.collection_name = "pdf_search_collection"
         self.idx = 0
         self.files = files
@@ -166,12 +167,14 @@ class PdfBrowser(BaseAction):
                  description: Optional[dict] = None,
                  parser: Type[BaseParser] = JsonParser,
                  enable: bool = True,
+                 api_key: str = None,
                  files = List[Tuple[str, BufferedReader]],
                  **kwargs):
         self.searcher = eval(searcher_type)(
             black_list=black_list,
             topk=topk,
             files=files,
+            api_key=api_key,
             **kwargs)
         self.fetcher = ContentFetcher(timeout=timeout)
         self.search_results = None
